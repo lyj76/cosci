@@ -1,0 +1,44 @@
+reference/*
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.local
+
+# Local config override (user-specific provider + model + budget choices).
+# Tracked example lives in config/default.toml.
+co-scientist.toml
+
+# Vendor (large pinned external repos)
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+build/
+dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local-only docs (not committed)
+docs/REIMPL_VS_PAPER.md
+
+# Tests / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage

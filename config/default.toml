@@ -1,0 +1,184 @@
+# AI Co-Scientist — default configuration
+# User overrides: ~/.co-scientist/config.toml or ./co-scientist.toml
+# Secrets: env vars only (ANTHROPIC_API_KEY, VOYAGE_API_KEY, TAVILY_API_KEY, ...)
+
+[run]
+concurrency = 4
+max_ideas = 60
+max_matches_per_idea = 12
+reflection_verification_enabled = true
+generation_refill_batch = 4
+generation_debate_every = 4
+generation_debate_turns = 4
+max_generation_attempts_multiplier = 2
+evolution_min_mature = 8
+evolution_every_matches = 10
+wall_clock_seconds = 7200            # 2h default
+budget_tokens = 5_000_000
+budget_usd = 25.0
+
+[storage]
+data_dir = "./data"
+
+[science_skills]
+path = "./vendor/science-skills"
+pinned_commit = ""                   # set after first clone
+
+[embeddings]
+provider = "voyage"                  # voyage | openai
+model = "voyage-3-large"
+dim = 1024
+
+[vectors]
+backend = "faiss"
+dedup_cosine_threshold = 0.92
+cluster_threshold = 0.15
+full_recluster_every_matches = 20
+
+[ranking]
+k_factor_new = 32
+k_factor_warm = 16
+elo_initial = 1200
+debate_when_matches_lt = 2
+debate_when_elo_delta_lt = 50
+batch_below_decile = true
+batch_submit_every_seconds = 1800    # 30 min
+p_new = 0.4
+p_close = 0.4
+p_random = 0.2
+debate_turns = 4
+position_swap_enabled = true
+position_swap_pairwise = true
+
+[termination]
+elo_stability_k = 5                  # top-K tracked
+elo_stability_n = 3                  # snapshots compared
+elo_stability_eps = 25.0
+match_snapshot_every = 10
+
+[budget_shares]
+generation = 0.20
+reflection = 0.20
+ranking    = 0.25
+evolution  = 0.15
+metareview = 0.10
+proximity  = 0.02
+reserve    = 0.08
+
+[models]
+parse_goal          = "claude-sonnet-4-6"
+generation          = "claude-opus-4-7"
+reflection          = "claude-opus-4-7"
+evolution           = "claude-opus-4-7"
+ranking_pairwise    = "claude-sonnet-4-6"
+ranking_debate      = "claude-sonnet-4-6"
+ranking_priority    = "claude-opus-4-7"
+metareview_feedback = "claude-sonnet-4-6"
+metareview_final    = "claude-opus-4-7"
+classifier          = "claude-haiku-4-5-20251001"
+judge               = "claude-sonnet-4-6"
+
+[thinking]
+# per agent.mode budgets; 0 = disabled
+generation_literature   = 4000
+generation_debate       = 8000
+reflection_full         = 0
+reflection_verification = 12000
+reflection_observation  = 6000
+ranking_pairwise        = 4000
+ranking_debate          = 8000
+evolution_combine       = 6000
+evolution_out_of_box    = 6000
+evolution_feasibility   = 0
+evolution_simplify      = 0
+metareview_feedback     = 8000
+metareview_final        = 16000
+
+[tool_loop]
+generation_max_iters = 8
+reflection_max_iters = 8
+ranking_max_iters    = 3
+evolution_max_iters  = 6
+metareview_max_iters = 12
+parallel_cap         = 4
+tool_timeout_seconds = 30
+tool_result_max_chars = 12000       # per tool result sent back to the LLM
+tool_result_item_max_chars = 1600   # cap long abstracts / page text fields
+tool_result_max_items = 6           # cap search results per tool response
+history_max_chars = 60000           # retain recent complete tool-call turns
+
+[retry]
+# Anthropic API
+max_attempts_429 = 6
+max_attempts_529 = 8
+max_attempts_5xx = 5
+max_attempts_timeout = 3
+base_ms = 1000
+cap_ms = 60_000
+per_call_timeout_seconds = 120
+per_call_timeout_thinking_seconds = 300
+
+[lease]
+default_seconds      = 300
+reflection_seconds   = 600
+metareview_final_seconds = 1800
+heartbeat_seconds    = 60
+max_attempts         = 3
+
+[web_search]
+provider = "tavily"                  # tavily | brave
+max_results = 8
+
+[web_fetch]
+max_bytes = 5_000_000
+timeout_seconds = 30
+user_agent = "co-scientist/0.1 (+research; contact via project README)"
+
+[code_exec]
+provider = "anthropic"               # anthropic | local
+local_cpu_seconds = 30
+local_mem_mb = 512
+
+[safety]
+enable_classifier = true
+enable_citation_verifier = true
+classifier_block_categories = ["cbrn", "csam", "weapons", "illicit_synthesis"]
+classifier_warn_categories = ["dual_use_bio"]
+
+# LLM provider selection. Choose one of:
+#   "anthropic"  — Claude via the official SDK (default). Full feature set:
+#                  cache breakpoints, extended thinking, batch API.
+#   "openai"     — OpenAI Chat Completions (api.openai.com). Reasoning
+#                  translated to `reasoning_effort` on o-series models.
+#   "openrouter" — openrouter.ai (200+ models from every major vendor).
+#                  Set OPENROUTER_API_KEY. Models like
+#                  "anthropic/claude-3.5-sonnet", "openai/gpt-5",
+#                  "google/gemini-2.5-pro", "meta-llama/llama-3.3-70b".
+#   "gemini"     — Google Gemini via OpenAI-compat endpoint. Set
+#                  GEMINI_API_KEY. Models: "gemini-2.5-pro",
+#                  "gemini-2.5-flash", "gemini-1.5-pro".
+#   "groq"       — Groq (fast Llama / Mixtral). Set GROQ_API_KEY.
+#   "together"   — Together AI. Set TOGETHER_API_KEY.
+#   "mistral"    — Mistral la-plateforme. Set MISTRAL_API_KEY.
+#   "ollama"     — Local Ollama at http://localhost:11434/v1 (no key needed).
+#   "openai_compatible" — Any other OpenAI-compatible endpoint; set
+#                  [llm.openai] base_url to point at it.
+#
+# After choosing a provider, set the entries in [models] to model ids it
+# can serve.
+[llm]
+provider = "anthropic"
+
+# For provider = "openai" / "openai_compatible" / any preset above: this
+# overrides the preset's base_url (rarely needed).
+[llm.openai]
+# base_url = ""
+
+# OpenRouter attribution (optional; for catalog ranking).
+[llm.openrouter]
+# referer = "https://your-app.example.com"
+# title   = "My Co-Scientist App"
+
+[web_ui]
+host = "127.0.0.1"
+port = 7878

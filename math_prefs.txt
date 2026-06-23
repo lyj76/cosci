@@ -1,0 +1,4 @@
+1. **引理化证明 (Lemmatized Proof)**: 证明过程必须拆解为清晰的引理（例如：定义等价关系、证明等价类是开集、证明等价类的集合是至多可数的）。
+2. **拓扑抽象 (Topological Abstraction)**: 尽量利用 $\mathbb{R}$ 作为拓扑空间的性质（如：Second-countability 二类可数性、Connected components 连通分支、Separability 可分性），而不仅仅是实数的有序性或度量。
+3. **逻辑核心 (Logic Core)**: 在 Reflection 阶段，必须严格检查并解释为什么这些开集是“互不相交”的，以及“至多可数”是如何从拓扑基或稠密子集中推导出来的。
+4. **格式要求**: 使用 LaTeX 渲染数学公式，确保逻辑推导步步有据。
