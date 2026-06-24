@@ -183,12 +183,64 @@ async def _run_with_progress(sup: Supervisor, goal: str, **kwargs) -> str:
     from rich.panel import Panel
 
     from .obs.metrics import session_metrics_cached
+    from .orchestrator.events import GLOBAL_BUS
 
     session_id: str | None = kwargs.get("resume_session_id")
+    events_task: asyncio.Task | None = None
 
     def on_start(sid: str):
         nonlocal session_id
         session_id = sid
+
+    async def _print_events(sid: str) -> None:
+        async for ev in GLOBAL_BUS.subscribe(sid):
+            payload = ev.payload or {}
+            if ev.name == "task_started":
+                console.print(
+                    f"[cyan]task started[/cyan] "
+                    f"{payload.get('agent')}:{payload.get('action')} "
+                    f"task={payload.get('task_id')} target={payload.get('target') or '-'}"
+                )
+            elif ev.name == "task_completed":
+                preview = payload.get("preview") or {}
+                console.print(
+                    f"[green]task completed[/green] "
+                    f"kind={payload.get('kind')} "
+                    f"hypotheses={','.join(payload.get('follow_hypothesis_ids') or []) or '-'}"
+                )
+                for h in preview.get("hypotheses") or []:
+                    console.print(
+                        f"  [bold]hypothesis[/bold] {h.get('id')} "
+                        f"{h.get('created_by')}/{h.get('strategy')} "
+                        f"state={h.get('state')} elo={h.get('elo') or '-'}\n"
+                        f"  title: {h.get('title') or '(no title)'}\n"
+                        f"  summary: {h.get('summary') or '(no summary)'}"
+                    )
+                for r in preview.get("reviews") or []:
+                    console.print(
+                        f"  [bold]review[/bold] {r.get('kind')} "
+                        f"verdict={r.get('verdict') or '?'} "
+                        f"novelty={r.get('novelty')} "
+                        f"correctness={r.get('correctness')} "
+                        f"testability={r.get('testability')}\n"
+                        f"  {r.get('body') or ''}"
+                    )
+                if preview.get("extra"):
+                    console.print(f"  [dim]extra: {preview.get('extra')}[/dim]")
+            elif ev.name == "task_failed":
+                console.print(
+                    f"[red]task failed[/red] task={payload.get('task_id')} "
+                    f"err={payload.get('err')}"
+                )
+            elif ev.name == "tool_call":
+                status = "[red]error[/red]" if payload.get("is_error") else "[green]ok[/green]"
+                console.print(
+                    f"[magenta]tool[/magenta] {payload.get('agent')} "
+                    f"{payload.get('tool')} {status} "
+                    f"{payload.get('duration_ms')}ms iter={payload.get('iteration')}"
+                )
+            elif ev.name in {"session_started", "session_done"}:
+                console.print(f"[bold]{ev.name}[/bold] {payload}")
 
     # Start supervisor task
     task = asyncio.create_task(sup.run_session(goal, on_session_start=on_start, **kwargs))
@@ -196,6 +248,8 @@ async def _run_with_progress(sup: Supervisor, goal: str, **kwargs) -> str:
     with Live(refresh_per_second=1, vertical_overflow="visible") as live:
         while not task.done():
             if session_id:
+                if events_task is None:
+                    events_task = asyncio.create_task(_print_events(session_id))
                 conn = await db_mod.connect(sup.cfg)
                 try:
                     m = await session_metrics_cached(conn, session_id)
@@ -215,7 +269,13 @@ async def _run_with_progress(sup: Supervisor, goal: str, **kwargs) -> str:
                     await conn.close()
             await asyncio.sleep(2)
 
-    return await task
+    try:
+        return await task
+    finally:
+        if events_task is not None:
+            events_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await events_task
 
 
 @app.command()
@@ -537,6 +597,7 @@ def bench_cmd(
         --judge anthropic:claude-sonnet-4-6
     """
     cfg, _ = ctx.obj
+    console.print("[dim]bench: parsing candidates and presets...[/dim]")
     from .bench import BenchCandidate, get_preset, run_bench
 
     def _custom_candidates(entries: list[str]) -> list[BenchCandidate]:
@@ -635,6 +696,7 @@ def bench_cmd(
     if candidate_universe is not None:
         from .search_space import load_candidate_universe
 
+        console.print(f"[dim]bench: loading candidate universe {candidate_universe}[/dim]")
         search_space_items = load_candidate_universe(candidate_universe)
         if n > len(search_space_items):
             n = len(search_space_items)
@@ -649,6 +711,7 @@ def bench_cmd(
                 "internal ranked shortlist.[/yellow]"
             )
 
+    console.print("[dim]bench: entering async runner...[/dim]")
     outcome = asyncio.run(
         run_bench(
             cfg, goal=goal, candidates=candidates,

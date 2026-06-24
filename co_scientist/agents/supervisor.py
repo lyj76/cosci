@@ -104,7 +104,11 @@ class Supervisor:
                     goal=goal[:120], session_id=session.id,
                     budget_usd=session.budget_usd, n_initial=n_initial,
                 )
-                await self._emit(conn, session.id, "session_started", {
+                # Do not block session startup on the persisted events mirror.
+                # SQLite write contention here can otherwise prevent parse_goal
+                # from ever starting; stdout/logs and the in-memory bus are enough
+                # for this bootstrap event.
+                await GLOBAL_BUS.publish(session.id, "session_started", {
                     "goal": goal[:200], "n_initial": n_initial,
                     "budget_usd": session.budget_usd,
                 })
@@ -113,11 +117,20 @@ class Supervisor:
                     budget_tokens=session.budget_tokens,
                     budget_usd=session.budget_usd,
                 )
+                print(f"[session] initializing provider session={session.id}", flush=True)
                 llm = get_provider(self.cfg, db=conn, budget=budget)
+                print(f"[session] provider ready session={session.id}", flush=True)
+                print(f"[session] discovering tools session={session.id}", flush=True)
                 tools = ToolRegistry(self.cfg).discover()
+                print(
+                    f"[session] tools ready session={session.id} n={len(tools.all())}",
+                    flush=True,
+                )
                 deps = AgentDeps(cfg=self.cfg, db=conn, llm=llm, tools=tools)
 
+                print(f"[session] parsing goal session={session.id}", flush=True)
                 plan = await self._parse_goal(deps, session, goal, preferences_text)
+                print(f"[session] parse goal done session={session.id}", flush=True)
                 await self._apply_plan(conn, session, plan)
                 session = await sess_repo.fetch(conn, session.id)
                 assert session is not None
@@ -303,9 +316,11 @@ class Supervisor:
 
                 await self._apply_follow_ups(conn, session, t, result)
                 await task_repo.complete(conn, t.id)
+                preview = await self._result_preview(conn, result)
                 await self._emit(conn, session.id, "task_completed",
                                  {"task_id": t.id, "kind": result.kind,
-                                  "follow_hypothesis_ids": result.hypothesis_ids[:5]})
+                                  "follow_hypothesis_ids": result.hypothesis_ids[:5],
+                                  "preview": preview})
 
         try:
             while True:
@@ -723,11 +738,65 @@ class Supervisor:
         event: str,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        await events_repo.emit(
-            conn, session_id=session_id, task_id=None, agent="supervisor",
-            event=event, payload=payload,
-        )
+        try:
+            await asyncio.wait_for(
+                events_repo.emit(
+                    conn, session_id=session_id, task_id=None, agent="supervisor",
+                    event=event, payload=payload,
+                ),
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.warning(
+                "event_emit_failed",
+                session_id=session_id,
+                event=event,
+                err=repr(e),
+            )
         await GLOBAL_BUS.publish(session_id, event, payload)
+
+    async def _result_preview(self, conn: aiosqlite.Connection, result) -> dict[str, Any]:
+        """Small human-readable snippets for CLI progress output."""
+        out: dict[str, Any] = {}
+        if result.hypothesis_ids:
+            hyps = await hyp_repo.fetch_many(conn, result.hypothesis_ids[:3])
+            out["hypotheses"] = [
+                {
+                    "id": h.id,
+                    "created_by": h.created_by,
+                    "strategy": h.strategy,
+                    "title": (h.title or "")[:180],
+                    "summary": (h.summary or "")[:320],
+                    "elo": h.elo,
+                    "state": h.state,
+                }
+                for h in hyps
+            ]
+        if result.review_ids:
+            reviews = []
+            for rid in result.review_ids[:3]:
+                review = await rev_repo.fetch(conn, rid)
+                if review is None:
+                    continue
+                reviews.append({
+                    "id": review.id,
+                    "hypothesis_id": review.hypothesis_id,
+                    "kind": review.kind,
+                    "verdict": review.verdict,
+                    "novelty": review.scores.novelty,
+                    "correctness": review.scores.correctness,
+                    "testability": review.scores.testability,
+                    "body": (review.body or "")[:400],
+                })
+            out["reviews"] = reviews
+        if result.match_ids:
+            out["matches"] = result.match_ids[:3]
+        if result.extra:
+            out["extra"] = {
+                k: v for k, v in result.extra.items()
+                if k in {"mode", "winner", "verdict", "reason", "strategies_used"}
+            }
+        return out
 
 
 # ----------------------------- helpers ----------------------------- #

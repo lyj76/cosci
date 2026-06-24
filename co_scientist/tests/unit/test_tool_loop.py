@@ -172,9 +172,11 @@ async def test_loop_dispatches_non_terminal_tools_then_continues() -> None:
         )
     )
 
+    spec = _spec()
+    spec.route.thinking_tokens = 1024
     result = await run_tool_loop(
         client,
-        spec=_spec(),
+        spec=spec,
         ctx=_ctx(),
         registry=registry,
         max_iters=8,
@@ -334,9 +336,11 @@ async def test_dashscope_terminal_output_uses_reason_then_extract() -> None:
     registry = MagicMock()
     registry._cfg = SimpleNamespace()
 
+    spec = _spec()
+    spec.route.thinking_tokens = 1024
     result = await run_tool_loop(
         client,
-        spec=_spec(),
+        spec=spec,
         ctx=_ctx(),
         registry=registry,
         max_iters=3,
@@ -355,6 +359,98 @@ async def test_dashscope_terminal_output_uses_reason_then_extract() -> None:
         "name": "record_hypothesis",
     }
     assert result.tool_calls[-1]["args"]["statement"] == "corrected statement"
+
+
+@pytest.mark.asyncio
+async def test_dashscope_terminal_output_without_thinking_skips_two_phase() -> None:
+    """Plain DeepSeek/DashScope tool calls should not pay for an extra synthesis pass."""
+    draft = _fake_response(
+        stop_reason="tool_use",
+        blocks=[
+            {
+                "type": "tool_use",
+                "id": "draft",
+                "name": "record_hypothesis",
+                "input": {"title": "draft", "statement": "draft statement"},
+            }
+        ],
+    )
+    client = MagicMock()
+    client._base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    client.call = AsyncMock(return_value=draft)
+    registry = MagicMock()
+    registry._cfg = SimpleNamespace()
+
+    result = await run_tool_loop(
+        client,
+        spec=_spec(),
+        ctx=_ctx(),
+        registry=registry,
+        max_iters=3,
+        parallel_cap=4,
+        tool_timeout_s=1.0,
+        force_terminal_tool="record_hypothesis",
+    )
+
+    assert client.call.await_count == 1
+    assert result.tool_calls[-1]["args"]["statement"] == "draft statement"
+
+
+@pytest.mark.asyncio
+async def test_invalid_terminal_tool_input_gets_one_repair_attempt() -> None:
+    bad = _fake_response(
+        stop_reason="tool_use",
+        blocks=[
+            {
+                "type": "tool_use",
+                "id": "bad",
+                "name": "record_hypothesis",
+                "input": {"_raw_arguments": '{"title": "truncated"'},
+            }
+        ],
+    )
+    repaired = _fake_response(
+        stop_reason="tool_use",
+        blocks=[
+            {
+                "type": "tool_use",
+                "id": "fixed",
+                "name": "record_hypothesis",
+                "input": {"title": "fixed", "statement": "fixed statement"},
+            }
+        ],
+    )
+    client = MagicMock()
+    client.call = AsyncMock(side_effect=[bad, repaired])
+    registry = MagicMock()
+    registry._cfg = SimpleNamespace()
+    spec = _spec()
+    spec.tools.append({
+        "name": "record_hypothesis",
+        "description": "",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "statement": {"type": "string"},
+            },
+            "required": ["title", "statement"],
+        },
+    })
+
+    result = await run_tool_loop(
+        client,
+        spec=spec,
+        ctx=_ctx(),
+        registry=registry,
+        max_iters=3,
+        parallel_cap=4,
+        tool_timeout_s=1.0,
+        force_terminal_tool="record_hypothesis",
+    )
+
+    assert client.call.await_count == 2
+    assert result.tool_calls[-1]["args"]["statement"] == "fixed statement"
 
 
 def test_tool_result_compaction_bounds_items_and_abstracts() -> None:

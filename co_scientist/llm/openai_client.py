@@ -23,6 +23,7 @@ Caveats (intentional gaps vs. AnthropicClient):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -35,6 +36,7 @@ import aiosqlite
 
 from ..config import Config
 from ..ids import transcript_id
+from ..logging import get_logger
 from ..models import Transcript
 from ..storage.artifacts import write_json
 from ..storage.repos import sessions as sessions_repo
@@ -48,6 +50,8 @@ from .anthropic_client import (
 from .budgets import TokenBudget
 from .retry import RetryPolicy, with_retry
 from .routing import estimate_cost_usd
+
+log = get_logger("llm.openai")
 
 # --------------------------------------------------------------------------- #
 # Adapter types that quack like anthropic.types.Message / content blocks
@@ -197,6 +201,21 @@ class OpenAIClient:
     ) -> AnthropicResponse:
         request = _build_openai_request(spec)
         self._apply_vendor_quirks(request)
+        log.info(
+            "llm_call_start",
+            provider="openai_compatible" if self._compat_mode else "openai",
+            base_url=self._base_url,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            agent=ctx.agent,
+            action=ctx.action,
+            mode=ctx.mode,
+            model=spec.route.model,
+            tools=len(spec.tools),
+            tool_choice=request.get("tool_choice"),
+            max_tokens=request.get("max_tokens"),
+            message_count=len(request.get("messages", [])),
+        )
 
         # Estimate + admit (same accounting as AnthropicClient).
         est_in = est_input_tokens or _rough_token_count(spec)
@@ -212,11 +231,30 @@ class OpenAIClient:
         t0 = time.monotonic()
 
         async def _do() -> Any:
-            return await self._client.chat.completions.create(**request)
+            timeout_s = (
+                self._cfg.retry.per_call_timeout_thinking_seconds
+                if spec.route.thinking_tokens > 0
+                else self._cfg.retry.per_call_timeout_seconds
+            )
+            return await asyncio.wait_for(
+                self._client.chat.completions.create(**request),
+                timeout=timeout_s,
+            )
 
         try:
             raw = await with_retry(_do, policy=self._retry)
-        except BaseException:
+        except BaseException as e:
+            log.warning(
+                "llm_call_failed",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                action=ctx.action,
+                mode=ctx.mode,
+                model=spec.route.model,
+                err=repr(e),
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
             await self._budget.settle(
                 ctx.agent,
                 est_tokens=est_in + est_out, est_usd=est_cost,
@@ -226,6 +264,20 @@ class OpenAIClient:
         finished = datetime.now(UTC)
 
         message = _adapt_response(raw, spec.route.model)
+        log.info(
+            "llm_call_done",
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            agent=ctx.agent,
+            action=ctx.action,
+            mode=ctx.mode,
+            model=spec.route.model,
+            stop_reason=message.stop_reason,
+            content_blocks=len(message.content or []),
+            input_tokens=message.usage.input_tokens,
+            output_tokens=message.usage.output_tokens,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+        )
         in_tok = message.usage.input_tokens
         out_tok = message.usage.output_tokens
         cost_usd = estimate_cost_usd(

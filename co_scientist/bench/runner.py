@@ -156,6 +156,7 @@ async def run_bench(
 
     bench_id_ = ids.bench_id()
     bind(bench_id=bench_id_)
+    print(f"[bench] runner start id={bench_id_}", flush=True)
     log.info(
         "bench_started",
         goal=goal,
@@ -166,6 +167,7 @@ async def run_bench(
 
     conn = await db_mod.connect(base_cfg)
     try:
+        print("[bench] connected database", flush=True)
         await _insert_bench_row(
             conn,
             bench_id_,
@@ -194,8 +196,10 @@ async def run_bench(
             budget_usd=per_candidate_budget_usd * max(1, len(candidates)),
         )
         await sess_repo.insert(conn, ses)
+        print(f"[bench] bench session created session={ses.id}", flush=True)
 
         # 2. Generate hypotheses for each candidate in parallel.
+        print(f"[bench] generating candidates n={len(candidates)}", flush=True)
         states = await _generate_for_all_candidates(
             base_cfg,
             conn,
@@ -211,6 +215,7 @@ async def run_bench(
         #    times, randomly drawing one hypothesis from each side. Judged
         #    by a single fixed model.
         n_matches = 0
+        print(f"[bench] generation phase complete matches_per_pair={matches_per_pair}", flush=True)
         if matches_per_pair > 0:
             judge_cfg = _candidate_cfg(base_cfg, judge_provider, judge_model)
             # Judge work routes through agent="ranking"; route 100% of the
@@ -237,6 +242,7 @@ async def run_bench(
         # 4. Optional gold-set scoring: did the candidate surface any of the
         #    curated answer-key entities?
         if goldset is not None:
+            print(f"[bench] scoring goldset {goldset.label}", flush=True)
             for st in states:
                 if not st.hypothesis_records:
                     continue
@@ -254,6 +260,7 @@ async def run_bench(
         # 5. Aggregate stats per candidate + write to bench_candidates.
         for st in states:
             await _persist_candidate_stats(conn, st)
+        print("[bench] persisted candidate stats", flush=True)
 
         total_cost = sum(s.cost_usd for s in states)
 
@@ -328,6 +335,11 @@ async def _generate_for_all_candidates(
     await conn.commit()
 
     async def _one_candidate(st: _CandidateState, progress_task) -> None:
+        print(
+            f"[bench] start {st.spec.label} mode={st.spec.mode} "
+            f"provider={st.spec.provider} model={st.spec.model}",
+            flush=True,
+        )
         try:
             await _generate_for_candidate(
                 base_cfg,
@@ -342,6 +354,22 @@ async def _generate_for_all_candidates(
             st.error = str(e)
             log.exception("candidate_generation_failed", candidate=st.spec.label, err=str(e))
         finally:
+            status = "failed" if st.error else "done"
+            print(
+                f"[bench] {status} {st.spec.label} "
+                f"hyps={len(st.hypotheses)} cost=${st.cost_usd:.4f} "
+                f"err={st.error or '-'}",
+                flush=True,
+            )
+            for h in st.hypotheses[:5]:
+                print(
+                    "[bench] hypothesis "
+                    f"{st.spec.label} {h.id} {h.created_by}/{h.strategy} "
+                    f"state={h.state} elo={h.elo if h.elo is not None else '-'}\n"
+                    f"  title: {(h.title or '')[:180] or '(no title)'}\n"
+                    f"  summary: {(h.summary or '')[:320] or '(no summary)'}",
+                    flush=True,
+                )
             if progress_task is not None:
                 p_progress.update(progress_task, advance=1)
 
@@ -447,6 +475,11 @@ async def _generate_for_candidate(
                 task.id,
                 error=str(e),
                 max_attempts=cfg.lease.max_attempts,
+            )
+            print(
+                f"[bench] generation task failed "
+                f"candidate={st.spec.label} idx={i} task={task.id} err={e}",
+                flush=True,
             )
             log.warning("bench_generation_failed", candidate=st.spec.label, idx=i, err=str(e))
             continue

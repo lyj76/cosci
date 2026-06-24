@@ -18,10 +18,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..ids import tool_run_id
+from ..logging import get_logger
+from ..orchestrator.events import GLOBAL_BUS
 from ..safety.quoting import quote_untrusted
 from ..tools.base import ToolCtx
 from ..tools.registry import ToolRegistry
 from .anthropic_client import AgentCallSpec, AnthropicClient, AnthropicResponse, CallContext
+
+log = get_logger("llm.tool_loop")
 
 
 class ToolLoopExhausted(RuntimeError):
@@ -97,13 +101,36 @@ async def run_tool_loop(
 
     last: AnthropicResponse | None = None
     two_phase_done = False
+    terminal_repair_done = False
 
     while iterations < max_iters:
         iterations += 1
+        log.info(
+            "tool_loop_iteration_start",
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            agent=ctx.agent,
+            action=ctx.action,
+            mode=ctx.mode,
+            iteration=iterations,
+            max_iters=max_iters,
+            extra_messages=len(current_spec.extra_messages),
+            force_terminal=bool(force_terminal_tool and iterations == max_iters),
+        )
         # On the final allowed iteration, optionally force the recording tool so
         # the model commits instead of burning its last turn on another search.
         call_spec = current_spec
         if force_terminal_tool and iterations == max_iters:
+            log.info(
+                "tool_loop_force_terminal",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                action=ctx.action,
+                mode=ctx.mode,
+                iteration=iterations,
+                terminal_tool=force_terminal_tool,
+            )
             call_spec = AgentCallSpec(
                 route=current_spec.route,
                 system_blocks=current_spec.system_blocks,
@@ -117,8 +144,29 @@ async def run_tool_loop(
         resp = await client.call(call_spec, ctx)
         last = resp
         stop = getattr(resp.raw, "stop_reason", None)
+        log.info(
+            "tool_loop_llm_returned",
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            agent=ctx.agent,
+            action=ctx.action,
+            mode=ctx.mode,
+            iteration=iterations,
+            stop_reason=stop,
+            content_blocks=len(resp.raw.content or []),
+        )
 
         if stop != "tool_use":
+            log.info(
+                "tool_loop_stop_non_tool",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                action=ctx.action,
+                mode=ctx.mode,
+                iteration=iterations,
+                stop_reason=stop,
+            )
             return ToolLoopResult(
                 response=resp,
                 iterations=iterations,
@@ -131,6 +179,15 @@ async def run_tool_loop(
             b for b in resp.raw.content if getattr(b, "type", None) == "tool_use"
         ]
         if not tool_uses:
+            log.info(
+                "tool_loop_stop_no_tool_uses",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                action=ctx.action,
+                mode=ctx.mode,
+                iteration=iterations,
+            )
             return ToolLoopResult(
                 response=resp,
                 iterations=iterations,
@@ -143,12 +200,45 @@ async def run_tool_loop(
         # the call so observability sees it, but we do NOT dispatch (the
         # registry would return "unknown tool" anyway) and we do NOT loop.
         if any(getattr(b, "name", "") in terminal_set for b in tool_uses):
+            terminal_blocks = [
+                b for b in tool_uses if getattr(b, "name", "") in terminal_set
+            ]
+            terminal_error = _terminal_input_error(terminal_blocks[0], current_spec.tools)
+            log.info(
+                "tool_loop_terminal_seen",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                action=ctx.action,
+                mode=ctx.mode,
+                iteration=iterations,
+                tools=[getattr(b, "name", "") for b in tool_uses],
+                valid=terminal_error is None,
+                invalid_reason=terminal_error,
+                dashscope_two_phase=bool(
+                    force_terminal_tool
+                    and not two_phase_done
+                    and _needs_dashscope_two_phase(client)
+                    and current_spec.route.thinking_tokens > 0
+                ),
+            )
             if (
                 force_terminal_tool
                 and not two_phase_done
                 and _needs_dashscope_two_phase(client)
+                and current_spec.route.thinking_tokens > 0
             ):
                 two_phase_done = True
+                log.info(
+                    "tool_loop_dashscope_two_phase_start",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    agent=ctx.agent,
+                    action=ctx.action,
+                    mode=ctx.mode,
+                    iteration=iterations,
+                    terminal_tool=force_terminal_tool,
+                )
                 resp = await _reason_then_extract(
                     client,
                     current_spec=current_spec,
@@ -157,6 +247,17 @@ async def run_tool_loop(
                     draft_tool_uses=tool_uses,
                 )
                 last = resp
+                log.info(
+                    "tool_loop_dashscope_two_phase_done",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    agent=ctx.agent,
+                    action=ctx.action,
+                    mode=ctx.mode,
+                    iteration=iterations,
+                    stop_reason=getattr(resp.raw, "stop_reason", None),
+                    content_blocks=len(resp.raw.content or []),
+                )
                 tool_uses = [
                     b for b in resp.raw.content
                     if getattr(b, "type", None) == "tool_use"
@@ -170,6 +271,58 @@ async def run_tool_loop(
                         tool_calls=tool_calls_log,
                         seen_urls=seen_urls,
                     )
+            terminal_blocks = [
+                b for b in tool_uses if getattr(b, "name", "") in terminal_set
+            ]
+            terminal_error = (
+                _terminal_input_error(terminal_blocks[0], current_spec.tools)
+                if terminal_blocks
+                else "missing_terminal_tool"
+            )
+            if (
+                terminal_error
+                and force_terminal_tool
+                and not terminal_repair_done
+            ):
+                terminal_repair_done = True
+                log.warning(
+                    "tool_loop_terminal_invalid_repair_start",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    agent=ctx.agent,
+                    action=ctx.action,
+                    mode=ctx.mode,
+                    iteration=iterations,
+                    terminal_tool=force_terminal_tool,
+                    reason=terminal_error,
+                )
+                resp = await _repair_terminal_tool(
+                    client,
+                    current_spec=current_spec,
+                    ctx=ctx,
+                    terminal_tool=force_terminal_tool,
+                    draft_tool_uses=terminal_blocks or tool_uses,
+                    reason=terminal_error,
+                )
+                last = resp
+                log.info(
+                    "tool_loop_terminal_invalid_repair_done",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                    agent=ctx.agent,
+                    action=ctx.action,
+                    mode=ctx.mode,
+                    iteration=iterations,
+                    stop_reason=getattr(resp.raw, "stop_reason", None),
+                    content_blocks=len(resp.raw.content or []),
+                )
+                tool_uses = [
+                    b for b in resp.raw.content
+                    if getattr(b, "type", None) == "tool_use"
+                ]
+                terminal_blocks = [
+                    b for b in tool_uses if getattr(b, "name", "") in terminal_set
+                ]
             for b in tool_uses:
                 tool_calls_log.append({
                     "name": getattr(b, "name", ""),
@@ -186,6 +339,16 @@ async def run_tool_loop(
 
         tool_uses = tool_uses[:parallel_cap]
         kept_ids = {getattr(tu, "id", None) for tu in tool_uses}
+        log.info(
+            "tool_loop_dispatch_tools",
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            agent=ctx.agent,
+            action=ctx.action,
+            mode=ctx.mode,
+            iteration=iterations,
+            tools=[getattr(tu, "name", "") for tu in tool_uses],
+        )
 
         # Dispatch in parallel
         results = await asyncio.gather(
@@ -195,6 +358,28 @@ async def run_tool_loop(
 
         # Update url tracking + log
         for tu, r in zip(tool_uses, results, strict=True):
+            log.info(
+                "tool_call",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                agent=ctx.agent,
+                tool=tu.name,
+                is_error=r["is_error"],
+                duration_ms=r.get("duration_ms", 0),
+                iteration=iterations,
+            )
+            await GLOBAL_BUS.publish(
+                ctx.session_id,
+                "tool_call",
+                {
+                    "agent": ctx.agent,
+                    "task_id": ctx.task_id,
+                    "tool": tu.name,
+                    "is_error": r["is_error"],
+                    "duration_ms": r.get("duration_ms", 0),
+                    "iteration": iterations,
+                },
+            )
             tool_calls_log.append(
                 {
                     "name": tu.name,
@@ -274,6 +459,15 @@ async def _reason_then_extract(
     draft_tool_uses: list[Any],
 ) -> AnthropicResponse:
     """Run tool-free deep synthesis, then a non-thinking structured extraction."""
+    log.info(
+        "dashscope_two_phase_reasoning_start",
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        agent=ctx.agent,
+        action=ctx.action,
+        mode=ctx.mode,
+        terminal_tool=terminal_tool,
+    )
     draft = [
         {
             "name": getattr(block, "name", ""),
@@ -307,6 +501,16 @@ async def _reason_then_extract(
     )
     reasoning_response = await client.call(reasoning_spec, ctx)
     reasoning_brief = _response_reasoning_text(reasoning_response)[:20_000]
+    log.info(
+        "dashscope_two_phase_reasoning_done",
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        agent=ctx.agent,
+        action=ctx.action,
+        mode=ctx.mode,
+        stop_reason=getattr(reasoning_response.raw, "stop_reason", None),
+        brief_chars=len(reasoning_brief),
+    )
 
     extraction_messages = list(current_spec.extra_messages)
     extraction_messages.append({
@@ -331,7 +535,27 @@ async def _reason_then_extract(
         stop_sequences=current_spec.stop_sequences,
         extra_messages=extraction_messages,
     )
-    return await client.call(extraction_spec, ctx)
+    log.info(
+        "dashscope_two_phase_extraction_start",
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        agent=ctx.agent,
+        action=ctx.action,
+        mode=ctx.mode,
+        terminal_tool=terminal_tool,
+    )
+    extraction_response = await client.call(extraction_spec, ctx)
+    log.info(
+        "dashscope_two_phase_extraction_done",
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        agent=ctx.agent,
+        action=ctx.action,
+        mode=ctx.mode,
+        stop_reason=getattr(extraction_response.raw, "stop_reason", None),
+        content_blocks=len(extraction_response.raw.content or []),
+    )
+    return extraction_response
 
 
 def _response_reasoning_text(response: AnthropicResponse) -> str:
@@ -344,6 +568,90 @@ def _response_reasoning_text(response: AnthropicResponse) -> str:
         if text:
             parts.append(str(text))
     return "\n\n".join(parts)
+
+
+async def _repair_terminal_tool(
+    client,
+    *,
+    current_spec: AgentCallSpec,
+    ctx: CallContext,
+    terminal_tool: str,
+    draft_tool_uses: list[Any],
+    reason: str,
+) -> AnthropicResponse:
+    draft = [
+        {
+            "name": getattr(block, "name", ""),
+            "input": _compact_terminal_input(dict(getattr(block, "input", {}) or {})),
+        }
+        for block in draft_tool_uses
+    ]
+    repair_messages = list(current_spec.extra_messages)
+    repair_messages.append({
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": (
+                f"The previous `{terminal_tool}` tool call was invalid: {reason}.\n"
+                "Repair it now using only the evidence and tool results already in "
+                "this conversation. Call the same tool exactly once. Keep the output "
+                "concise: one clear title, one sentence statement, a focused mechanism "
+                "or review note, no repeated entities, at most 12 entities, and at most "
+                "5 citations/evidence entries. Do not include `_raw_arguments`."
+                "\n\nINVALID STRUCTURED DRAFT:\n"
+                f"{json.dumps(draft, ensure_ascii=False)}"
+            ),
+        }],
+    })
+    repair_spec = AgentCallSpec(
+        route=current_spec.route,
+        system_blocks=current_spec.system_blocks,
+        user_blocks=current_spec.user_blocks,
+        tools=current_spec.tools,
+        tool_choice={"type": "tool", "name": terminal_tool},
+        max_output_tokens=min(current_spec.max_output_tokens, 4096),
+        stop_sequences=current_spec.stop_sequences,
+        extra_messages=repair_messages,
+    )
+    return await client.call(repair_spec, ctx)
+
+
+def _terminal_input_error(block: Any, tools: list[dict[str, Any]]) -> str | None:
+    name = getattr(block, "name", "")
+    payload = getattr(block, "input", None)
+    if not isinstance(payload, dict):
+        return "terminal_input_not_object"
+    if "_raw_arguments" in payload:
+        return "terminal_input_raw_arguments"
+    required = _required_tool_fields(name, tools)
+    missing = [field for field in required if not payload.get(field)]
+    if missing:
+        return "missing_required:" + ",".join(missing)
+    return None
+
+
+def _required_tool_fields(name: str, tools: list[dict[str, Any]]) -> list[str]:
+    for tool in tools:
+        if tool.get("name") == name:
+            schema = tool.get("input_schema") or {}
+            required = schema.get("required") or []
+            return [str(field) for field in required]
+    return []
+
+
+def _compact_terminal_input(payload: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "_raw_arguments":
+            text = str(value)
+            out[key] = text[:1000] + ("...[truncated]" if len(text) > 1000 else "")
+        elif isinstance(value, str):
+            out[key] = value[:1200] + ("...[truncated]" if len(value) > 1200 else "")
+        elif isinstance(value, list):
+            out[key] = value[:12]
+        else:
+            out[key] = value
+    return out
 
 
 async def _dispatch(

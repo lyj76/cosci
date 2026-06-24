@@ -143,7 +143,13 @@ async def with_retry(
                 _backoff_ms(policy.base_ms // 2 or 250, policy.cap_ms // 2, attempt_5xx) / 1000
             )
 
-        except (APITimeoutError, APIConnectionError, httpx.TimeoutException, httpx.NetworkError) as e:
+        except (
+            APITimeoutError,
+            APIConnectionError,
+            asyncio.TimeoutError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ) as e:
             attempt_timeout += 1
             attempt_total += 1
             if attempt_timeout >= policy.max_attempts_timeout or attempt_total >= policy.max_attempts_total:
