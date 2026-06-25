@@ -14,7 +14,7 @@ max_generation_attempts_multiplier = 2
 evolution_min_mature = 8
 evolution_every_matches = 10
 wall_clock_seconds = 7200            # 2h default
-budget_tokens = 5_000_000
+budget_tokens = 0
 budget_usd = 25.0
 
 [storage]

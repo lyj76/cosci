@@ -62,7 +62,7 @@ dev = [
 openai = ["openai>=1.40.0"]
 
 [project.scripts]
-co-scientist = "co_scientist.cli:app"
+co-scientist = "co_scientist.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["co_scientist"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from co_scientist.agents.generation import _filter_to_seen_urls, _render_hypothesis_md
-from co_scientist.agents.reflection import _render_review_md
+from co_scientist.agents.reflection import _normalize_review_record, _render_review_md
 from co_scientist.models import Review
 from co_scientist.safety.citation_verifier import summarize_verification
 
@@ -62,6 +62,24 @@ def test_review_md_renders_sections() -> None:
     assert "plausible" in md
     assert "https://e.example/p" in md
     assert "n" in md
+
+
+def test_review_record_normalizes_assumption_plausibility_aliases() -> None:
+    record = {
+        "assumptions": [
+            {"assumption": "A1", "plausibility": "verified", "rationale": "R1"},
+            {"assumption": "A2", "plausibility": "surprising", "rationale": "R2"},
+            {"assumption": "A3", "plausibility": "implausible", "rationale": "R3"},
+        ]
+    }
+    _normalize_review_record(record)
+    assert [a["plausibility"] for a in record["assumptions"]] == [
+        "plausible",
+        "uncertain",
+        "implausible",
+    ]
+    assert record["assumptions"][0]["original_plausibility"] == "verified"
+    assert record["assumptions"][1]["original_plausibility"] == "surprising"
 
 
 def test_verification_verdicts_are_valid_review_values() -> None:

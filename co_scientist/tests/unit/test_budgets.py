@@ -56,6 +56,45 @@ async def test_global_cap_eventually_blocks_runaway_spend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_token_cap_error_names_token_budget() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=100, budget_usd=25.0)
+
+    with pytest.raises(BudgetExceeded, match="session token budget exhausted") as exc:
+        await b.admit("generation", est_tokens=101, est_usd=0.01)
+
+    msg = str(exc.value)
+    assert "est_tokens=101" in msg
+    assert "cap_tokens=100" in msg
+    assert "cap_usd=25.00" in msg
+
+
+@pytest.mark.asyncio
+async def test_usd_cap_error_names_usd_budget() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=10_000, budget_usd=1.0)
+
+    with pytest.raises(BudgetExceeded, match="session USD budget exhausted") as exc:
+        await b.admit("generation", est_tokens=10, est_usd=1.01)
+
+    msg = str(exc.value)
+    assert "est_usd=1.01" in msg
+    assert "cap_usd=1.00" in msg
+    assert "cap_tokens=10000" in msg
+
+
+@pytest.mark.asyncio
+async def test_zero_token_budget_disables_token_cap_but_keeps_usd_cap() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=0, budget_usd=1.0)
+
+    await b.admit("generation", est_tokens=1_000_000_000, est_usd=0.10)
+
+    with pytest.raises(BudgetExceeded, match="session USD budget exhausted"):
+        await b.admit("generation", est_tokens=1, est_usd=1.01)
+
+
+@pytest.mark.asyncio
 async def test_per_agent_share_is_enforced() -> None:
     cfg = Config()
     # share for generation is 20% by default → $0.20 of $1

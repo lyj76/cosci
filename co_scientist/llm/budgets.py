@@ -40,6 +40,8 @@ class TokenBudget:
     # ----------------------------- shares ------------------------------- #
 
     def share_tokens(self, agent: str) -> int:
+        if self.budget_tokens <= 0:
+            return 0
         pct = self._agent_share_pct(agent)
         return int(self.budget_tokens * pct)
 
@@ -67,16 +69,27 @@ class TokenBudget:
         async with self._lock:
             ctr = self._per_agent.setdefault(agent, _Counter())
             # Session-wide cap first (includes reserve)
-            if (
-                self._global.used_tokens + self._global.reserved_tokens + est_tokens
-                > self.budget_tokens
-            ) or (
-                self._global.used_usd + self._global.reserved_usd + est_usd
-                > self.budget_usd
-            ):
+            token_total = self._global.used_tokens + self._global.reserved_tokens + est_tokens
+            usd_total = self._global.used_usd + self._global.reserved_usd + est_usd
+            if self.budget_tokens > 0 and token_total > self.budget_tokens:
                 raise BudgetExceeded(
-                    f"session budget exhausted (used_usd={self._global.used_usd:.2f},"
-                    f" reserved={self._global.reserved_usd:.2f}, cap={self.budget_usd:.2f})"
+                    "session token budget exhausted "
+                    f"(used_tokens={self._global.used_tokens}, "
+                    f"reserved_tokens={self._global.reserved_tokens}, "
+                    f"est_tokens={est_tokens}, cap_tokens={self.budget_tokens}; "
+                    f"used_usd={self._global.used_usd:.2f}, "
+                    f"reserved_usd={self._global.reserved_usd:.2f}, "
+                    f"est_usd={est_usd:.2f}, cap_usd={self.budget_usd:.2f})"
+                )
+            if usd_total > self.budget_usd:
+                raise BudgetExceeded(
+                    "session USD budget exhausted "
+                    f"(used_usd={self._global.used_usd:.2f}, "
+                    f"reserved_usd={self._global.reserved_usd:.2f}, "
+                    f"est_usd={est_usd:.2f}, cap_usd={self.budget_usd:.2f}; "
+                    f"used_tokens={self._global.used_tokens}, "
+                    f"reserved_tokens={self._global.reserved_tokens}, "
+                    f"est_tokens={est_tokens}, cap_tokens={self.budget_tokens})"
                 )
             # Per-agent share (skip for never-degrade agents — caller passes 'metareview_final'
             # via the same agent='metareview' key, but the reserve covers it).

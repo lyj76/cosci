@@ -106,6 +106,7 @@ class ReflectionAgent(BaseAgent):
         record = self._final_tool_use(loop_result.response, "record_review")
         if record is None:
             raise RuntimeError("Reflection did not call record_review")
+        _normalize_review_record(record)
 
         # Drop evidence entries whose URL we never saw — keep the review honest.
         seen = loop_result.seen_urls
@@ -170,6 +171,57 @@ class ReflectionAgent(BaseAgent):
             hypothesis_ids=[h.id],
             extra={"verdict": record.get("verdict"), "review_kind": kind},
         )
+
+
+_ASSUMPTION_PLAUSIBILITY = {"plausible", "uncertain", "implausible"}
+_PLAUSIBILITY_ALIASES = {
+    "verified": "plausible",
+    "supported": "plausible",
+    "support": "plausible",
+    "likely": "plausible",
+    "true": "plausible",
+    "ok": "plausible",
+    "unverified": "uncertain",
+    "unknown": "uncertain",
+    "unclear": "uncertain",
+    "mixed": "uncertain",
+    "ambiguous": "uncertain",
+    "not_checked": "uncertain",
+    "not checked": "uncertain",
+    "weak": "uncertain",
+    "unsupported": "implausible",
+    "contradicted": "implausible",
+    "false": "implausible",
+    "disproved": "implausible",
+    "unlikely": "implausible",
+}
+
+
+def _normalize_review_record(record: dict[str, Any]) -> None:
+    """Normalize model tool-call drift before strict Review validation.
+
+    OpenAI-compatible providers may not enforce JSON-schema enums strictly.
+    Keep the stored Review model canonical while preserving the model's raw
+    value in the JSON artifact for audit.
+    """
+    assumptions = record.get("assumptions")
+    if not isinstance(assumptions, list):
+        record["assumptions"] = []
+        return
+    normalized: list[dict[str, Any]] = []
+    for assumption in assumptions:
+        if not isinstance(assumption, dict):
+            continue
+        raw = assumption.get("plausibility")
+        key = str(raw or "").strip().lower()
+        value = key if key in _ASSUMPTION_PLAUSIBILITY else _PLAUSIBILITY_ALIASES.get(key)
+        if value is None:
+            value = "uncertain"
+        if raw != value:
+            assumption["original_plausibility"] = raw
+            assumption["plausibility"] = value
+        normalized.append(assumption)
+    record["assumptions"] = normalized
 
 
 def _render_review_md(record: dict[str, Any]) -> str:

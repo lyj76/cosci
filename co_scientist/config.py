@@ -30,7 +30,7 @@ class RunCfg(BaseModel):
     evolution_min_mature: int = 8
     evolution_every_matches: int = 10
     wall_clock_seconds: int = 7200
-    budget_tokens: int = 5_000_000
+    budget_tokens: int = 0
     budget_usd: float = 25.0
 
 

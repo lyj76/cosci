@@ -328,26 +328,67 @@ class RankingAgent(BaseAgent):
         max_output_tokens: int = 2048,
     ):
         plan = session.research_plan
-        spec = AgentCallSpec(
-            route=route(self.deps.cfg, "ranking", "debate" if mode == "debate" else "pairwise"),
-            system_blocks=[
-                CachedBlock(self._system_prompt_header(), cache=True),
-                CachedBlock(
-                    f"# Research goal\n{session.research_goal}\n\n"
-                    f"# Preferences\n{'; '.join(plan.preferences)}\n\n"
-                    "Evidence marked unverified or fetch_failed is not reliable. "
-                    "Deep verification is more probative than a generic review. "
-                    "Do not call tools.",
-                    cache=True,
+        system_blocks = [
+            CachedBlock(self._system_prompt_header(), cache=True),
+            CachedBlock(
+                f"# Research goal\n{session.research_goal}\n\n"
+                f"# Preferences\n{'; '.join(plan.preferences)}\n\n"
+                "Evidence marked unverified or fetch_failed is not reliable. "
+                "Deep verification is more probative than a generic review. "
+                "Do not call tools.",
+                cache=True,
+            ),
+        ]
+
+        def make_spec(user_prompt: str, tokens: int) -> AgentCallSpec:
+            return AgentCallSpec(
+                route=route(
+                    self.deps.cfg,
+                    "ranking",
+                    "debate" if mode == "debate" else "pairwise",
                 ),
-            ],
-            user_blocks=[CachedBlock(prompt, cache=False)],
-            tools=[],
-            tool_choice=None,
-            max_output_tokens=max_output_tokens,
+                system_blocks=system_blocks,
+                user_blocks=[CachedBlock(user_prompt, cache=False)],
+                tools=[],
+                tool_choice=None,
+                max_output_tokens=tokens,
+            )
+
+        spec = make_spec(prompt, max_output_tokens)
+        response = await self.deps.llm.call(
+            spec,
+            CallContext(
+                session_id=session.id,
+                task_id=None,
+                agent="ranking",
+                action="RunTournamentBatch",
+                mode=mode,
+            ),
+        )
+        if self._final_text(response) or not _has_reasoning_only_output(response):
+            return response
+
+        # Some OpenAI-compatible reasoning models (for example DashScope-hosted
+        # DeepSeek variants) may spend the whole completion budget in
+        # `reasoning_content`, leaving visible `content` empty. That would make
+        # the tournament parser see an empty verdict and record an invalid
+        # match, even though the provider call itself succeeded.
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "Your previous attempt produced no visible final answer. "
+            "Respond in visible final content, concisely. Do not include hidden "
+            "reasoning. If this is a judging call, end with exactly one line: "
+            "`better idea: 1` or `better idea: 2`."
+        )
+        retry_tokens = max(max_output_tokens * 3, 4096)
+        log.warning(
+            "ranking_empty_visible_output_retry",
+            mode=mode,
+            stop_reason=getattr(response.raw, "stop_reason", None),
+            retry_tokens=retry_tokens,
         )
         return await self.deps.llm.call(
-            spec,
+            make_spec(retry_prompt, retry_tokens),
             CallContext(
                 session_id=session.id,
                 task_id=None,
@@ -486,6 +527,22 @@ def _parse_better_idea(text: str) -> int | None:
                     if m2:
                         return int(m2.group(1))
     return None
+
+
+def _has_reasoning_only_output(response) -> bool:
+    """True when an OpenAI-compatible reasoning model produced no visible text."""
+    content = getattr(response.raw, "content", None) or []
+    has_thinking = any(
+        getattr(block, "type", None) == "thinking"
+        and bool(getattr(block, "thinking", ""))
+        for block in content
+    )
+    has_text = any(
+        getattr(block, "type", None) == "text"
+        and bool((getattr(block, "text", "") or "").strip())
+        for block in content
+    )
+    return has_thinking and not has_text
 
 
 def _combine_position_swapped(

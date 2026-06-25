@@ -56,6 +56,35 @@ async def set_status(conn: aiosqlite.Connection, session_id: str, status: str) -
     await conn.commit()
 
 
+async def set_budget(
+    conn: aiosqlite.Connection,
+    session_id: str,
+    *,
+    budget_tokens: int | None = None,
+    budget_usd: float | None = None,
+) -> None:
+    session = await fetch(conn, session_id)
+    if session is None:
+        raise ValueError(f"session {session_id} not found")
+    next_tokens = session.budget_tokens if budget_tokens is None else budget_tokens
+    next_usd = session.budget_usd if budget_usd is None else budget_usd
+    snapshot = dict(session.config_snapshot)
+    run_snapshot = dict(snapshot.get("run") or {})
+    run_snapshot["budget_tokens"] = next_tokens
+    run_snapshot["budget_usd"] = next_usd
+    snapshot["run"] = run_snapshot
+    await conn.execute(
+        """UPDATE sessions
+              SET budget_tokens=?,
+                  budget_usd=?,
+                  config_snapshot=?,
+                  updated_at=?
+            WHERE id=?""",
+        (next_tokens, next_usd, json.dumps(snapshot), _now(), session_id),
+    )
+    await conn.commit()
+
+
 async def add_usage(
     conn: aiosqlite.Connection, session_id: str, tokens: int, usd: float
 ) -> None:

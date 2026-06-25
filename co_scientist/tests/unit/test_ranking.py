@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from co_scientist.agents.ranking import (
     RankingAgent,
     _combine_position_swapped,
+    _has_reasoning_only_output,
     _parse_better_idea,
 )
 from co_scientist.config import Config
@@ -46,6 +48,21 @@ def test_parse_better_idea_word_boundary_excludes_12() -> None:
     """'better idea: 12 because...' must NOT be read as '1'."""
     # `12` should not match `[12]\b`.
     assert _parse_better_idea("better idea: 12 because of context") is None
+
+
+def test_detects_reasoning_only_output() -> None:
+    response = SimpleNamespace(raw=SimpleNamespace(content=[
+        SimpleNamespace(type="thinking", thinking="internal reasoning", text=""),
+    ]))
+    assert _has_reasoning_only_output(response)
+
+
+def test_reasoning_only_detection_ignores_visible_text() -> None:
+    response = SimpleNamespace(raw=SimpleNamespace(content=[
+        SimpleNamespace(type="thinking", thinking="internal reasoning", text=""),
+        SimpleNamespace(type="text", thinking="", text="better idea: 1"),
+    ]))
+    assert not _has_reasoning_only_output(response)
 
 
 # ----------------------------- mode selection ----------------------------- #
