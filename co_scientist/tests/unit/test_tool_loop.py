@@ -24,6 +24,7 @@ from co_scientist.llm.anthropic_client import (
 from co_scientist.llm.routing import ModelRoute
 from co_scientist.llm.tool_loop import (
     _compact_tool_content,
+    _content_to_dicts,
     _tool_result_block,
     _trim_tool_history,
     run_tool_loop,
@@ -127,6 +128,30 @@ async def test_loop_ends_normally_on_end_turn() -> None:
         tool_timeout_s=1.0,
     )
     assert result.iterations == 1
+
+
+def test_content_to_dicts_preserves_tool_use_signature() -> None:
+    blocks = [
+        SimpleNamespace(
+            type="tool_use",
+            id="call_1",
+            name="pubmed_search",
+            input={"query": "APOE4"},
+            signature="sig_123",
+        )
+    ]
+
+    out = _content_to_dicts(blocks)
+
+    assert out == [
+        {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "pubmed_search",
+            "input": {"query": "APOE4"},
+            "signature": "sig_123",
+        }
+    ]
 
 
 @pytest.mark.asyncio

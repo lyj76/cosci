@@ -5,7 +5,12 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from co_scientist.llm.retry import RetryExhausted, RetryPolicy, with_retry
+from co_scientist.llm.retry import (
+    RetryExhausted,
+    RetryPolicy,
+    _find_retry_delay,
+    with_retry,
+)
 
 
 @pytest.mark.asyncio
@@ -62,3 +67,18 @@ async def test_returns_on_eventual_success() -> None:
     )
     assert await with_retry(flap, policy=policy) == "done"
     assert calls["n"] == 3
+
+
+def test_finds_gemini_retry_info_delay() -> None:
+    body = [{
+        "error": {
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "46.007606061s",
+                }
+            ]
+        }
+    }]
+
+    assert _find_retry_delay(body) == 46.007606061

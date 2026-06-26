@@ -322,6 +322,40 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def _apply_model_profile(merged: dict[str, Any]) -> dict[str, Any]:
+    """Apply an optional named model profile before pydantic validation.
+
+    Profiles live under `[model_profiles.<name>]` and may contain normal config
+    sections such as `llm`, `models`, `thinking`, or `embeddings`. This keeps
+    provider/model switching local to one config file while preserving the
+    existing final `Config` shape used by the rest of the codebase.
+    """
+    profiles = merged.get("model_profiles")
+    if not isinstance(profiles, dict):
+        return merged
+
+    active = (
+        os.environ.get("COSCI_MODEL_PROFILE")
+        or str(profiles.get("active") or "").strip()
+    )
+    if not active:
+        return merged
+
+    selected = profiles.get(active)
+    if not isinstance(selected, dict):
+        raise ValueError(f"model profile {active!r} not found in [model_profiles]")
+
+    out = dict(merged)
+    for section, value in selected.items():
+        if section == "active":
+            continue
+        if isinstance(value, dict) and isinstance(out.get(section), dict):
+            out[section] = _deep_merge(out[section], value)
+        else:
+            out[section] = value
+    return out
+
+
 def load_config(extra_path: Path | None = None) -> Config:
     """Layered load: default.toml → ~/.co-scientist/config.toml → ./co-scientist.toml → extra_path → env."""
     merged: dict[str, Any] = _read_toml(DEFAULT_CONFIG)
@@ -334,6 +368,7 @@ def load_config(extra_path: Path | None = None) -> Config:
         if p is not None:
             merged = _deep_merge(merged, _read_toml(p))
 
+    merged = _apply_model_profile(merged)
     cfg = Config.model_validate(merged)
     # secrets pulled from env via Secrets() — already wired by default_factory above
     return cfg

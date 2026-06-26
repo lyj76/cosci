@@ -7,7 +7,10 @@ mysterious errors at first call.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from co_scientist.config import Config, has_llm_key, provider_key_env
+from co_scientist.config import load_config
 
 
 def _cfg(provider: str) -> Config:
@@ -76,3 +79,69 @@ def test_anthropic_provider_does_not_accept_openai_key() -> None:
     cfg = _cfg("anthropic")
     cfg.secrets.OPENAI_API_KEY = "sk-fake"
     assert not has_llm_key(cfg)
+
+
+def test_model_profile_applies_named_provider_stack(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "co-scientist.toml").write_text(
+        """
+[model_profiles]
+active = "gemini35flash"
+
+[model_profiles.deepseek_dashscope.llm]
+provider = "openai_compatible"
+
+[model_profiles.deepseek_dashscope.llm.openai]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+[model_profiles.deepseek_dashscope.models]
+generation = "deepseek-v4-pro"
+
+[model_profiles.gemini35flash.llm]
+provider = "gemini"
+
+[model_profiles.gemini35flash.models]
+generation = "gemini-3.5-flash"
+judge = "gemini-3.5-flash"
+
+[model_profiles.gemini35flash.thinking]
+generation_literature = 0
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+
+    assert cfg.llm.provider == "gemini"
+    assert cfg.models.generation == "gemini-3.5-flash"
+    assert cfg.models.judge == "gemini-3.5-flash"
+    assert cfg.thinking.generation_literature == 0
+
+
+def test_model_profile_can_be_overridden_by_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COSCI_MODEL_PROFILE", "gemini35flash")
+    (tmp_path / "co-scientist.toml").write_text(
+        """
+[model_profiles]
+active = "deepseek_dashscope"
+
+[model_profiles.deepseek_dashscope.llm]
+provider = "openai_compatible"
+
+[model_profiles.deepseek_dashscope.models]
+generation = "deepseek-v4-pro"
+
+[model_profiles.gemini35flash.llm]
+provider = "gemini"
+
+[model_profiles.gemini35flash.models]
+generation = "gemini-3.5-flash"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+
+    assert cfg.llm.provider == "gemini"
+    assert cfg.models.generation == "gemini-3.5-flash"

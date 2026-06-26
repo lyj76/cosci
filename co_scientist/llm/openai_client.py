@@ -154,17 +154,24 @@ class OpenAIClient:
         self._compat_mode = compat_mode or preset_base_url is not None
 
         # API key resolution precedence:
-        #   1. explicit OPENAI_API_KEY (cfg.secrets or env)
-        #   2. preset-specific env var (e.g. OPENROUTER_API_KEY, GEMINI_API_KEY)
-        api_key = (
-            cfg.secrets.OPENAI_API_KEY
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
-        )
-        if not api_key and preset_api_key_env:
+        #   1. preset-specific env var for named presets (e.g.
+        #      OPENROUTER_API_KEY, GEMINI_API_KEY)
+        #   2. OPENAI_API_KEY fallback
+        #
+        # This lets one .env hold multiple vendor keys while `llm.provider`
+        # decides which one is sent. Plain openai/openai_compatible still use
+        # OPENAI_API_KEY directly because they have no preset-specific key.
+        api_key = ""
+        if preset_api_key_env:
             api_key = (
                 getattr(cfg.secrets, preset_api_key_env, "")
                 or os.environ.get(preset_api_key_env)
+                or ""
+            )
+        if not api_key:
+            api_key = (
+                cfg.secrets.OPENAI_API_KEY
+                or os.environ.get("OPENAI_API_KEY")
                 or ""
             )
         # Local OpenAI-compat servers (Ollama, vLLM, LM Studio) often don't
@@ -344,10 +351,22 @@ class OpenAIClient:
         DashScope's OpenAI-compatible function-calling docs require
         `enable_thinking=false` during tool use; otherwise forced
         `tool_choice` requests fail in thinking mode.
+
+        Gemini's OpenAI-compat docs show `tool_choice="auto"` for tools;
+        forced function calling is documented on the native API as ANY rather
+        than OpenAI's specific-function object. For compatibility, when the
+        normalized spec asks for one specific function, send only that function
+        and require a tool call. This preserves the intended "call this tool"
+        semantics without relying on undocumented Gemini behavior.
         """
         if not request.get("tools"):
             return
         base = self._base_url.lower()
+        is_gemini = "generativelanguage.googleapis.com" in base
+        if is_gemini:
+            _apply_gemini_tool_choice_quirk(request)
+            _apply_gemini_tool_history_quirk(request)
+
         is_dashscope = (
             "dashscope.aliyuncs.com" in base
             or ".maas.aliyuncs.com" in base
@@ -359,6 +378,101 @@ class OpenAIClient:
             extra = {}
             request["extra_body"] = extra
         extra.setdefault("enable_thinking", False)
+
+
+def _apply_gemini_tool_choice_quirk(request: dict[str, Any]) -> None:
+    choice = request.get("tool_choice")
+    if not isinstance(choice, dict):
+        return
+    function = choice.get("function")
+    if not isinstance(function, dict):
+        return
+    name = function.get("name")
+    if not name:
+        return
+
+    tools = request.get("tools")
+    if isinstance(tools, list):
+        filtered = [
+            t for t in tools
+            if (
+                isinstance(t, dict)
+                and isinstance(t.get("function"), dict)
+                and t["function"].get("name") == name
+            )
+        ]
+        if filtered:
+            request["tools"] = filtered
+    request["tool_choice"] = "required"
+
+
+def _apply_gemini_tool_history_quirk(request: dict[str, Any]) -> None:
+    """Avoid Gemini OpenAI-compat thought-signature validation failures.
+
+    Gemini 3.x validates prior functionCall parts in conversation history and
+    requires their thought signatures. The OpenAI-compatible chat response does
+    not reliably expose those signatures, so a formal assistant tool_call from
+    a previous turn can make the next request fail with HTTP 400.
+
+    For Gemini only, keep the *current* request tools intact, but flatten prior
+    assistant tool_calls and tool results into ordinary text messages. This
+    preserves the information the model needs while avoiding unsigned historical
+    functionCall parts.
+    """
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return
+
+    flattened: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            flattened.append(msg)
+            continue
+
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            calls = msg.get("tool_calls")
+            if isinstance(calls, list) and not _all_tool_calls_have_signatures(calls):
+                text_parts: list[str] = []
+                content = msg.get("content")
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                text_parts.append("Previous tool requests:")
+                for tc in calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                    name = fn.get("name", "")
+                    args = fn.get("arguments", "")
+                    call_id = tc.get("id", "")
+                    text_parts.append(f"- id={call_id} name={name} arguments={args}")
+                flattened.append({"role": "assistant", "content": "\n".join(text_parts)})
+                continue
+
+        if msg.get("role") == "tool":
+            call_id = msg.get("tool_call_id", "")
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, default=str, ensure_ascii=False)
+            flattened.append({
+                "role": "user",
+                "content": f"Tool result for {call_id}:\n{content}",
+            })
+            continue
+
+        flattened.append(msg)
+
+    request["messages"] = flattened
+
+
+def _all_tool_calls_have_signatures(calls: list[Any]) -> bool:
+    saw_call = False
+    for tc in calls:
+        if not isinstance(tc, dict):
+            continue
+        saw_call = True
+        if not (tc.get("thought_signature") or tc.get("thoughtSignature")):
+            return False
+    return saw_call
 
 
 # --------------------------------------------------------------------------- #
@@ -459,14 +573,21 @@ def _translate_anthropic_message(m: dict[str, Any]) -> list[dict[str, Any]]:
             elif btype == "tool_use":
                 args = block.get("input", {})
                 args_str = json.dumps(args, default=str, ensure_ascii=False)
-                tool_calls.append({
+                tool_call = {
                     "id": block.get("id") or f"call_{uuid.uuid4().hex[:12]}",
                     "type": "function",
                     "function": {
                         "name": block.get("name", ""),
                         "arguments": args_str,
                     },
-                })
+                }
+                # Gemini 3.x returns a thought signature on function-call
+                # parts and requires it to be sent back with the assistant
+                # tool_call history on the next turn.
+                sig = block.get("signature") or block.get("thought_signature")
+                if sig:
+                    tool_call["thought_signature"] = sig
+                tool_calls.append(tool_call)
         msg: dict[str, Any] = {"role": "assistant"}
         if text_parts:
             msg["content"] = "\n".join(text_parts)
@@ -553,6 +674,7 @@ def _adapt_response(raw: Any, model: str) -> _Message:
                 id=getattr(tc, "id", "") or f"call_{uuid.uuid4().hex[:12]}",
                 name=name,
                 input=args_obj,
+                signature=_extract_thought_signature(tc, fn),
             ))
 
     usage_obj = getattr(raw, "usage", None)
@@ -574,6 +696,35 @@ def _adapt_response(raw: Any, model: str) -> _Message:
         model=model,
         id=getattr(raw, "id", "") or "",
     )
+
+
+def _extract_thought_signature(*objs: Any) -> str:
+    """Best-effort extraction for Gemini's function-call thought signatures.
+
+    OpenAI-compatible providers may surface vendor extension fields either as
+    normal attributes or in pydantic `model_extra`. Preserve only the value;
+    request translation decides the outbound field name.
+    """
+    keys = ("thought_signature", "thoughtSignature")
+    for obj in objs:
+        if obj is None:
+            continue
+        for key in keys:
+            value = getattr(obj, key, None)
+            if value:
+                return str(value)
+        extra = getattr(obj, "model_extra", None)
+        if isinstance(extra, dict):
+            for key in keys:
+                value = extra.get(key)
+                if value:
+                    return str(value)
+        if isinstance(obj, dict):
+            for key in keys:
+                value = obj.get(key)
+                if value:
+                    return str(value)
+    return ""
 
 
 # --------------------------------------------------------------------------- #

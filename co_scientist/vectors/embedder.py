@@ -15,6 +15,7 @@ import os
 from itertools import pairwise
 from typing import Protocol
 
+import httpx
 import numpy as np
 
 from ..config import Config
@@ -119,6 +120,55 @@ class OpenAIEmbedder:
 
 
 # --------------------------------------------------------------------------- #
+# Gemini
+
+
+class GeminiEmbedder:
+    """Gemini native embedding client using `models/*:embedContent`.
+
+    Kept separate from OpenAIEmbedder so Gemini model profiles can use
+    GEMINI_API_KEY without accidentally sending DashScope/OpenAI-compatible
+    keys to api.openai.com.
+    """
+
+    def __init__(self, cfg: Config) -> None:
+        self.model = cfg.embeddings.model
+        self.dim = cfg.embeddings.dim
+        self._cfg = cfg
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype="float32")
+        api_key = self._cfg.secrets.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY not set; cannot use GeminiEmbedder")
+
+        model = self.model
+        if model.startswith("models/"):
+            model = model.removeprefix("models/")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            vectors: list[list[float]] = []
+            for text in texts:
+                payload = {
+                    "content": {"parts": [{"text": text or ""}]},
+                    "output_dimensionality": self.dim,
+                }
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                emb = data.get("embedding") or {}
+                values = emb.get("values")
+                if not isinstance(values, list):
+                    raise RuntimeError("Gemini embedding response missing embedding.values")
+                vectors.append([float(v) for v in values])
+
+        return _l2_normalize(np.asarray(vectors, dtype="float32"))
+
+
+# --------------------------------------------------------------------------- #
 # Resolver
 
 
@@ -208,6 +258,11 @@ def make_embedder(cfg: Config) -> Embedder:
         if cfg.secrets.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY"):
             return OpenAIEmbedder(cfg)
         _warn_once("openai_key_missing_using_hash_fallback")
+        return HashEmbedder(cfg)
+    if provider == "gemini":
+        if cfg.secrets.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY"):
+            return GeminiEmbedder(cfg)
+        _warn_once("gemini_key_missing_using_hash_fallback")
         return HashEmbedder(cfg)
     if provider == "hash":
         return HashEmbedder(cfg)

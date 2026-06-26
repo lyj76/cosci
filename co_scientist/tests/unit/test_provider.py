@@ -170,15 +170,26 @@ def test_provider_groq_preset() -> None:
     assert mock_sdk.call_args.kwargs["base_url"] == "https://api.groq.com/openai/v1"
 
 
-def test_explicit_openai_api_key_overrides_preset_env() -> None:
-    """OPENAI_API_KEY takes precedence over a preset's specific env var."""
+def test_preset_env_overrides_openai_api_key() -> None:
+    """Named presets use their vendor key first so one .env can hold several
+    provider credentials without cross-sending the wrong key."""
     cfg = Config()
     cfg.llm.provider = "openrouter"
     cfg.secrets.OPENAI_API_KEY = "user-explicit"
     cfg.secrets.OPENROUTER_API_KEY = "sk-or"
     with patch("openai.AsyncOpenAI") as mock_sdk:
         get_provider(cfg, db=MagicMock(), budget=MagicMock())
-    assert mock_sdk.call_args.kwargs["api_key"] == "user-explicit"
+    assert mock_sdk.call_args.kwargs["api_key"] == "sk-or"
+
+
+def test_gemini_key_is_used_even_when_openai_api_key_is_set() -> None:
+    cfg = Config()
+    cfg.llm.provider = "gemini"
+    cfg.secrets.OPENAI_API_KEY = "dashscope-or-openai-key"
+    cfg.secrets.GEMINI_API_KEY = "gemini-fake"
+    with patch("openai.AsyncOpenAI") as mock_sdk:
+        get_provider(cfg, db=MagicMock(), budget=MagicMock())
+    assert mock_sdk.call_args.kwargs["api_key"] == "gemini-fake"
 
 
 def test_user_base_url_overrides_preset() -> None:
@@ -284,6 +295,81 @@ def test_dashscope_tools_disable_thinking_mode() -> None:
     assert req["extra_body"]["enable_thinking"] is False
 
 
+def test_gemini_forced_tool_choice_uses_required_single_tool() -> None:
+    cfg = Config()
+    cfg.llm.provider = "gemini"
+    cfg.secrets.GEMINI_API_KEY = "gemini-fake"
+    with patch("openai.AsyncOpenAI"):
+        client = get_provider(cfg, db=MagicMock(), budget=MagicMock())
+
+    req = _build_openai_request(
+        AgentCallSpec(
+            route=_route(model="gemini-3.5-flash"),
+            user_blocks=[CachedBlock("go")],
+            tools=[
+                {
+                    "name": "search",
+                    "description": "Search",
+                    "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+                {
+                    "name": "record_hypothesis",
+                    "description": "Save a hypothesis",
+                    "input_schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+                },
+            ],
+            tool_choice={"type": "tool", "name": "record_hypothesis"},
+        )
+    )
+    client._apply_vendor_quirks(req)
+
+    assert req["tool_choice"] == "required"
+    assert [t["function"]["name"] for t in req["tools"]] == ["record_hypothesis"]
+
+
+def test_gemini_unsigned_tool_history_is_flattened_to_text() -> None:
+    cfg = Config()
+    cfg.llm.provider = "gemini"
+    cfg.secrets.GEMINI_API_KEY = "gemini-fake"
+    with patch("openai.AsyncOpenAI"):
+        client = get_provider(cfg, db=MagicMock(), budget=MagicMock())
+
+    req = {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+            {"role": "user", "content": "search first"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "pubmed_search", "arguments": '{"query":"APOE4"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"hits":[]}'},
+        ],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "pubmed_search",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            },
+        }],
+        "tool_choice": "auto",
+    }
+
+    client._apply_vendor_quirks(req)
+
+    assert all("tool_calls" not in m for m in req["messages"])
+    assert all(m["role"] != "tool" for m in req["messages"])
+    assert req["messages"][1]["role"] == "assistant"
+    assert "Previous tool requests" in req["messages"][1]["content"]
+    assert req["messages"][2]["role"] == "user"
+    assert "Tool result for call_1" in req["messages"][2]["content"]
+
+
 def test_thinking_dropped_for_non_reasoning_model() -> None:
     spec = AgentCallSpec(
         route=_route(model="gpt-5", thinking=8000),
@@ -328,6 +414,23 @@ def test_translate_assistant_tool_use_to_openai_tool_calls() -> None:
     assert tc["function"]["name"] == "search"
     assert tc["function"]["arguments"] == '{"q": "abc"}'
     assert tc["id"] == "call_1"
+
+
+def test_translate_assistant_tool_use_preserves_gemini_signature() -> None:
+    msg = {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "search",
+                "input": {"q": "abc"},
+                "signature": "sig_123",
+            },
+        ],
+    }
+    out = _translate_anthropic_message(msg)
+    assert out[0]["tool_calls"][0]["thought_signature"] == "sig_123"
 
 
 def test_translate_user_tool_result_to_openai_tool_message() -> None:
@@ -384,6 +487,8 @@ def _fake_openai_response(*, text: str = "", tool_calls: list[dict] | None = Non
             id=tc["id"],
             type="function",
             function=SimpleNamespace(name=tc["name"], arguments=tc["arguments"]),
+            thought_signature=tc.get("thought_signature", ""),
+            model_extra=tc.get("model_extra", {}),
         ))
     msg = SimpleNamespace(content=text or None, tool_calls=tcs or None)
     choice = SimpleNamespace(message=msg, finish_reason=finish)
@@ -413,6 +518,34 @@ def test_adapt_response_tool_call() -> None:
     assert tu.name == "search"
     assert tu.input == {"q": "foo"}
     assert tu.id == "call_42"
+
+
+def test_adapt_response_preserves_gemini_thought_signature() -> None:
+    raw = _fake_openai_response(
+        tool_calls=[{
+            "id": "call_42",
+            "name": "search",
+            "arguments": '{"q": "foo"}',
+            "thought_signature": "sig_123",
+        }],
+        finish="tool_calls",
+    )
+    msg = _adapt_response(raw, "gemini-3.5-flash")
+    assert msg.content[0].signature == "sig_123"
+
+
+def test_adapt_response_reads_signature_from_model_extra() -> None:
+    raw = _fake_openai_response(
+        tool_calls=[{
+            "id": "call_42",
+            "name": "search",
+            "arguments": '{"q": "foo"}',
+            "model_extra": {"thoughtSignature": "sig_extra"},
+        }],
+        finish="tool_calls",
+    )
+    msg = _adapt_response(raw, "gemini-3.5-flash")
+    assert msg.content[0].signature == "sig_extra"
 
 
 def test_adapt_response_handles_malformed_tool_args() -> None:

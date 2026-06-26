@@ -196,6 +196,65 @@ async def test_dashscope_embedder_batches_at_ten_inputs() -> None:
     assert len(second_batch) == 2
 
 
+def test_make_embedder_uses_gemini_provider_when_key_set() -> None:
+    from co_scientist.config import Config
+    from co_scientist.vectors.embedder import GeminiEmbedder, make_embedder
+
+    cfg = Config()
+    cfg.embeddings.provider = "gemini"
+    cfg.embeddings.model = "gemini-embedding-2"
+    cfg.secrets.GEMINI_API_KEY = "gemini-fake"
+
+    emb = make_embedder(cfg)
+
+    assert isinstance(emb, GeminiEmbedder)
+    assert emb.model == "gemini-embedding-2"
+
+
+def test_make_embedder_gemini_falls_back_to_hash_without_key() -> None:
+    from co_scientist.config import Config
+    from co_scientist.vectors.embedder import HashEmbedder, make_embedder
+
+    cfg = Config()
+    cfg.embeddings.provider = "gemini"
+    cfg.secrets.GEMINI_API_KEY = ""
+
+    emb = make_embedder(cfg)
+
+    assert isinstance(emb, HashEmbedder)
+
+
+@pytest.mark.asyncio
+async def test_gemini_embedder_calls_native_embed_content() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from co_scientist.config import Config
+    from co_scientist.vectors.embedder import GeminiEmbedder
+
+    cfg = Config()
+    cfg.embeddings.provider = "gemini"
+    cfg.embeddings.model = "gemini-embedding-2"
+    cfg.embeddings.dim = 4
+    cfg.secrets.GEMINI_API_KEY = "gemini-fake"
+
+    response = MagicMock()
+    response.json.return_value = {"embedding": {"values": [1.0, 0.0, 0.0, 0.0]}}
+    response.raise_for_status.return_value = None
+    client = MagicMock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        vecs = await GeminiEmbedder(cfg).embed(["aml hypothesis"])
+
+    assert vecs.shape == (1, 4)
+    client.post.assert_awaited_once()
+    kwargs = client.post.await_args.kwargs
+    assert kwargs["headers"]["x-goog-api-key"] == "gemini-fake"
+    assert kwargs["json"]["output_dimensionality"] == 4
+
+
 def test_fallback_warning_emits_once_per_process() -> None:
     """Regression: ranking calls make_embedder() inside the pair-selection
     loop (potentially hundreds of times per session). The fallback warning

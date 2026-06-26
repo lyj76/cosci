@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
 from anthropic import (
@@ -54,24 +55,69 @@ class RetryExhausted(RuntimeError):
 def _retry_after_seconds(err: APIStatusError) -> float | None:
     headers = getattr(getattr(err, "response", None), "headers", None)
     if not headers:
-        return None
+        return _body_retry_after_seconds(err)
     ra = headers.get("retry-after") or headers.get("Retry-After")
-    if ra is None:
+    if ra is not None:
+        try:
+            return float(ra)
+        except (TypeError, ValueError):
+            pass
+        # RFC 7231 also allows HTTP-date format.
+        try:
+            from datetime import UTC, datetime
+            when = parsedate_to_datetime(ra)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            delta = (when - datetime.now(UTC)).total_seconds()
+            return max(0.0, delta) if delta < 3600 else None
+        except (TypeError, ValueError):
+            pass
+    return _body_retry_after_seconds(err)
+
+
+def _body_retry_after_seconds(err: APIStatusError) -> float | None:
+    """Read Google/Gemini RetryInfo.retryDelay from OpenAI SDK errors."""
+    candidates: list[Any] = []
+    body = getattr(err, "body", None)
+    if body is not None:
+        candidates.append(body)
+    response = getattr(err, "response", None)
+    if response is not None:
+        try:
+            candidates.append(response.json())
+        except Exception:
+            pass
+    for body_obj in candidates:
+        delay = _find_retry_delay(body_obj)
+        if delay is not None:
+            return delay
+    return None
+
+
+def _find_retry_delay(node: Any) -> float | None:
+    if isinstance(node, dict):
+        value = node.get("retryDelay")
+        if isinstance(value, str):
+            parsed = _parse_duration_seconds(value)
+            if parsed is not None:
+                return parsed
+        for child in node.values():
+            parsed = _find_retry_delay(child)
+            if parsed is not None:
+                return parsed
+    elif isinstance(node, list):
+        for child in node:
+            parsed = _find_retry_delay(child)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_duration_seconds(value: str) -> float | None:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)s\s*", value)
+    if not match:
         return None
-    try:
-        return float(ra)
-    except (TypeError, ValueError):
-        pass
-    # RFC 7231 also allows HTTP-date format.
-    try:
-        from datetime import UTC, datetime
-        when = parsedate_to_datetime(ra)
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=UTC)
-        delta = (when - datetime.now(UTC)).total_seconds()
-        return max(0.0, delta) if delta < 3600 else None
-    except (TypeError, ValueError):
-        return None
+    return float(match.group(1))
 
 
 def _backoff_ms(base_ms: int, cap_ms: int, attempt: int, *, full_jitter: bool = True) -> int:
