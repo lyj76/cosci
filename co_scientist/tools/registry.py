@@ -48,6 +48,12 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
 
     def discover(self) -> ToolRegistry:
+        # Local-corpus experiments must not accidentally call PubMed,
+        # Europe PMC, arXiv, web search, or web fetch.  Local PDF tools can be
+        # registered separately without changing this guard.
+        if self._cfg.tools.offline_mode:
+            return self
+
         # Built-ins
         for t in (
             WebFetchTool(self._cfg),

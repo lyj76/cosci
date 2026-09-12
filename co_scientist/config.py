@@ -244,6 +244,18 @@ class WebUICfg(BaseModel):
     port: int = 7878
 
 
+class ToolsCfg(BaseModel):
+    """Tool availability controls.
+
+    `offline_mode` is intentionally explicit: it prevents the registry from
+    exposing network-backed literature/search tools during local-corpus
+    experiments, making RAG evaluations reproducible.
+    """
+
+    offline_mode: bool = False
+    local_corpus_dir: str = "./data/papers"
+
+
 class Secrets(BaseSettings):
     """Secrets pulled from env only. Empty string means 'not configured'."""
 
@@ -283,6 +295,7 @@ class Config(BaseModel):
     code_exec: CodeExecCfg = Field(default_factory=CodeExecCfg)
     safety: SafetyCfg = Field(default_factory=SafetyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
+    tools: ToolsCfg = Field(default_factory=ToolsCfg)
     web_ui: WebUICfg = Field(default_factory=WebUICfg)
     secrets: Secrets = Field(default_factory=Secrets)
 

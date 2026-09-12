@@ -749,7 +749,38 @@ def eval_cmd(
     console.print_json(data=result)
 
 
+@app.command("oa-discover")
+def oa_discover_cmd(
+    ctx: typer.Context,
+    objective: str = typer.Option(
+        "基于这些pdf，对于骨关节炎，有什么从免疫层面干预测的方法，给出完整的推理路径",
+        "--objective",
+        "-o",
+        help="Research goal / objective for Osteoarthritis literature.",
+    ),
+    paper_dir: Path = typer.Option(
+        Path("paper"),
+        "--paper-dir",
+        "-p",
+        help="Path to directory containing local OA PDF papers.",
+    ),
+    output_dir: Path = typer.Option(
+        Path("data/runs/oa_discovery"),
+        "--output-dir",
+        help="Directory to save generated JSON and Markdown reports.",
+    ),
+) -> None:
+    """Run the 5-stage Osteoarthritis Multi-Agent Discovery Pipeline."""
+    cfg, _ = ctx.obj
+    from .orchestrator.oa_pipeline import run_oa_pipeline
+
+    console.print(Panel(f"[bold cyan]Osteoarthritis Multi-Agent AI Discovery Pipeline[/bold cyan]\nObjective: {objective}"))
+    res = asyncio.run(run_oa_pipeline(research_objective=objective, paper_dir=paper_dir, output_dir=output_dir))
+    console.print(f"[bold green]Discovery pipeline completed successfully![/bold green] Results at {output_dir}")
+
+
 @app.command("bench")
+
 def bench_cmd(
     ctx: typer.Context,
     goal: str | None = typer.Argument(
