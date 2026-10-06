@@ -92,6 +92,15 @@ RESEARCH OBJECTIVE:
 GROUNDED LITERATURE EVIDENCE:
 {evidence_summary}
 
+NEGATIVE FINDINGS AND GRAPH AUDIT:
+{json.dumps([asdict(c) for c in evidence.caveats_and_contradictions], ensure_ascii=False)}
+{json.dumps(getattr(evidence, 'graph_feedback', {}), ensure_ascii=False)}
+Preserve unresolved claims and scope restrictions in the primary statement.
+Do not turn absent effects in sham joints into proof of disease selectivity,
+or a proposed delivery solution into demonstrated accessibility. The selected
+discriminating experiment is a proposal, not a result. Prioritize minimal tests
+before complex therapeutic constructs; do not introduce new ungrounded targets.
+
 PROPOSED MECHANISM (from Mechanism Generator):
 Title: {mechanism.title}
 Target: {mechanism.molecular_target}

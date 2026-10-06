@@ -109,6 +109,10 @@ LITERATURE CAVEATS, NEGATIVE FINDINGS & BIOLOGICAL BARRIERS:
 {caveats_text}
 
 TASK:
+0. Respect the following version-specific graph audit. It includes retrieved passages,
+   scope checks and unresolved claims, not experimental proof. Do not infer support
+   from entity co-occurrence or from a proposed solution to a delivery problem:
+{json.dumps(getattr(evidence, 'graph_feedback', {}), ensure_ascii=False)}
 1. Audit each step of the mechanism chain. Flag any unsupported leaps or steps that confuse correlation with causation.
 2. Check whether the proposed therapeutic modality physically reaches the target cells (e.g. vascular vs avascular tissue, matrix barrier, off-target toxicity).
 3. Identify explicit contradictions or caveats between the hypothesis claims and the literature negative findings.

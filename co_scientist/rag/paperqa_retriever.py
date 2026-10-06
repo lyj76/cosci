@@ -101,6 +101,11 @@ class PaperQARetriever:
         self.embedding_batch_size = embedding_batch_size
 
         self.settings = Settings(
+            # PaperQA's Settings is a BaseSettings model with an empty
+            # environment prefix in recent releases.  Without an explicit
+            # prefix, unrelated process variables such as AGENT=1 can be
+            # parsed as PaperQA configuration and break initialization.
+            _env_prefix="PAPERQA_",
             llm=self.model,
             summary_llm=self.model,
             embedding=self.embedding_model,
@@ -174,7 +179,11 @@ class PaperQARetriever:
 
         references: list[str] = []
         if hasattr(session, "references") and session.references:
-            references = [str(r) for r in session.references]
+            raw_references = session.references
+            if isinstance(raw_references, str):
+                references = [raw_references]
+            else:
+                references = [str(r) for r in raw_references]
 
         return RetrievalResult(
             query=question,

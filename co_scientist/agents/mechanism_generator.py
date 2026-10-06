@@ -281,6 +281,12 @@ Improvement Directives:
 {chr(10).join(f"- {rec}" for rec in recommendations)}
 
 EVOLUTION OBJECTIVE ({mode}):
+Evidence and caveats (authoritative corpus context):
+{json.dumps(asdict(evidence), ensure_ascii=False)}
+Use graph_feedback to address the specific remaining claims. Keep unverified links
+explicitly hypothetical. Prefer scope reduction or a minimal discriminating test
+over adding ungrounded targets, delivery gadgets or drug combinations. A proposed
+experiment is not evidence and a mitigation paragraph does not resolve a critique.
 1. Overcome the Skeptic's objections directly (e.g. if tissue penetration was limited, evolve the delivery vehicle or engineer a smaller modality like nanobody/conjugate; if systemic toxicity or off-target risk was raised, engineer cell-type or condition-selective targeting; if correlation was conflated with causation, refine the causal chain).
 2. Maintain strong grounding in the available evidence while proposing an upgraded, logically watertight solution.
 3. Preserve the core scientific insight while elevating translational and mechanistic rigor.

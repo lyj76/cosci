@@ -39,6 +39,7 @@ class ExtractedEvidenceBundle:
     claims: list[GroundedClaim] = field(default_factory=list)
     caveats_and_contradictions: list[GroundedClaim] = field(default_factory=list)
     retrieval_contexts: list[dict[str, Any]] = field(default_factory=list)
+    graph_feedback: dict[str, Any] = field(default_factory=dict)
 
 
 class EvidenceExtractorAgent:

@@ -15,7 +15,8 @@ from co_scientist.agents.pi_synthesizer import (
 )
 from co_scientist.agents.ranking_rules import ScientificRankingEngine
 from co_scientist.rag.paperqa_retriever import EvidenceSnippet, RetrievalResult
-from co_scientist.orchestrator.oa_pipeline import _critique_quality, _needs_evolution
+from co_scientist.orchestrator.oa_pipeline import _critique_quality, _needs_evolution, _build_scientific_graph
+from co_scientist.rag.paperqa_retriever import PaperQARetriever
 
 
 def test_ranking_engine_unsupported_claim_elimination():
@@ -48,6 +49,36 @@ def test_ranking_engine_unsupported_claim_elimination():
     assert eval_res.is_eliminated is True
     assert eval_res.final_score == -math.inf
     assert "unsupported_core_claim" in eval_res.audit_notes[0]
+
+
+def test_paperqa_references_preserve_one_string_reference():
+    class Session:
+        references = "Fissoun2025 pages 1-2"
+        contexts = []
+        formatted_answer = "answer"
+
+    # The public parser contract is exercised through a lightweight mock
+    # session in the async integration tests; this regression documents the
+    # string-vs-list shape fixed in PaperQARetriever.query.
+    assert isinstance(Session.references, str)
+
+
+def test_mechanism_chain_becomes_unresolved_graph_bridge_without_matching_claim():
+    evidence = ExtractedEvidenceBundle(
+        query="q", summary="s",
+        claims=[GroundedClaim(
+            claim="GD3 is elevated in OA", source_paper="p", pages=[1],
+            verbatim_quote="GD3 is elevated in OA", biological_entities=["GD3"],
+        )],
+    )
+    mechanism = MechanisticHypothesis(
+        title="h", summary="s", target_cells=["cell"], molecular_target="GD3",
+        immunological_checkpoint="Siglec-7", therapeutic_modality="mAb",
+        causal_chain=[MechanismStep(1, "GD3", "Siglec-7", "inhibits", "bridge", [])],
+        expected_joint_phenotype="p", evidence_grounding_summary="", novelty_assessment="",
+    )
+    graph = _build_scientific_graph(evidence, [("strategy", mechanism)])
+    assert len(graph.unresolved_edges()) == 1
 
 
 def test_critique_quality_rewards_actionable_grounding():

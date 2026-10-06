@@ -13,6 +13,7 @@ from .session import ResearchPlan, Session, SessionStatus
 from .task import Task, TaskAction, TaskAgent, TaskResult, TaskResultKind, TaskStatus
 from .tournament import EloJournalEntry, MatchMode, TournamentMatch, Winner
 from .transcript import Transcript
+from .scientific_graph import ScientificEdge, ScientificGraph, ScientificNode
 
 __all__ = [
     "AssumptionCheck",
@@ -43,5 +44,8 @@ __all__ = [
     "TaskStatus",
     "TournamentMatch",
     "Transcript",
+    "ScientificEdge",
+    "ScientificGraph",
+    "ScientificNode",
     "Winner",
 ]

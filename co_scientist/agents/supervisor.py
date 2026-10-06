@@ -51,6 +51,7 @@ from ..storage.repos import events as events_repo
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
+from ..storage.repos import scientific as scientific_repo
 from ..storage.repos import sessions as sess_repo
 from ..storage.repos import tasks as task_repo
 from ..tools.registry import ToolRegistry
@@ -58,6 +59,7 @@ from .base import AgentDeps
 from .generation import GenerationAgent
 from .ranking import RankingAgent
 from .reflection import ReflectionAgent
+from .scientific_actions import ScientificActionAgent
 from .schemas import RECORD_RESEARCH_PLAN_TOOL
 
 log = get_logger("supervisor")
@@ -376,6 +378,47 @@ class Supervisor:
                         now = time.monotonic()
                         if now - last_decide_at >= 10.0:
                             last_decide_at = now
+                            # The graph controller is additive: until a task
+                            # has populated graph state, retain the mature
+                            # legacy refill policy below.
+                            graph = await scientific_repo.load_graph(conn, session.id)
+                            if graph.nodes or graph.edges:
+                                from .scientific_controller import choose_next_action
+                                remaining = max(
+                                    0.0, session.budget_usd - (refreshed.budget_used_usd if refreshed else 0.0)
+                                )
+                                candidates = await hyp_repo.list_for_session(conn, session.id)
+                                decision = choose_next_action(
+                                    graph, candidate_count=len(candidates),
+                                    budget_remaining=remaining,
+                                )
+                                await scientific_repo.record_decision(
+                                    conn, session.id, decision,
+                                    graph_coverage=graph.evidence_coverage(),
+                                    budget_remaining=remaining,
+                                )
+                                if decision.action == "retrieve_missing_evidence" and decision.target_edge:
+                                    source, target = decision.target_edge
+                                    await task_repo.enqueue(conn, Task(
+                                        id=ids.task_id(), session_id=session.id,
+                                        created_at=datetime.now(UTC), agent="scientific",
+                                        action="RetrieveEvidenceGap", target_id=None,
+                                        payload={"source_node": source, "target_node": target,
+                                                 "query": f"{source} {target} causal mechanism evidence"},
+                                        priority=110, status="pending",
+                                        idempotency_key=f"{session.id}::evidence-gap::{source}::{target}",
+                                    ))
+                                elif decision.action == "design_discriminating_experiment":
+                                    await task_repo.enqueue(conn, Task(
+                                        id=ids.task_id(), session_id=session.id,
+                                        created_at=datetime.now(UTC), agent="scientific",
+                                        action="DesignDiscriminatingExperiment", target_id=None,
+                                        payload={"candidate_ids": [h.id for h in candidates],
+                                                 "distinction": decision.reason,
+                                                 "expected_information_gain": decision.expected_information_gain},
+                                        priority=115, status="pending",
+                                        idempotency_key=f"{session.id}::experiment::{len(candidates)}",
+                                    ))
                             scheduled = await self._decide_next_steps(conn, session)
                             if scheduled == 0:
                                 # truly idle and no progress possible — exit gracefully
@@ -709,6 +752,7 @@ class Supervisor:
             "generation": GenerationAgent(deps),
             "reflection": ReflectionAgent(deps),
             "ranking": RankingAgent(deps),
+            "scientific": ScientificActionAgent(deps),
         }
         # Evolution / Proximity / Meta-review register if importable.
         try:
